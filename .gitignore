@@ -1,0 +1,32 @@
+# Entorno virtual
+seedenv_clean/
+venv/
+env/
+ENV/
+
+# Archivos de caché de Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.manifest
+*.spec
+
+# Resultados generados por el script (Imágenes y datos)
+*.png
+*.jpg
+*.jpeg
+*.csv
+
+# Videos (Carpeta completa de videos de entrada)
+videos/
+*.mp4
+*.avi
+*.mov
+*.mkv
+
+# Sistema operativo y editores
+.DS_Store
+Thumbs.db
+.vscode/
+.pycharm/
+.idea/
