@@ -1,0 +1,121 @@
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.fftpack import dct
+
+# 1. Configuración de rutas inmunes
+DIRECTORIO_ACTUAL = os.path.dirname(os.path.abspath(__file__))
+archivo_entrada = os.path.join(DIRECTORIO_ACTUAL, 'trayectorias_z_filtrado.csv')
+archivo_salida_csv = os.path.join(DIRECTORIO_ACTUAL, 'vector_movimiento_modelo.csv')
+archivo_grafica = os.path.join(DIRECTORIO_ACTUAL, 'analisis_optimizacion_movimiento.png')
+
+fs = 30.0  # 30 FPS
+nfft = 32  # Tamaño de ventana corta (~1 seg)
+hop_length = 8  # Desplazamiento
+n_mfcc = 13  # Coeficientes MFCC por ventana
+UMBRAL_ZERO_GATING = 0.5  # Energía mínima de velocidad para activar el canal
+
+# 2. Función sencilla de MFCCs por Ventanas
+def extraer_mfcc_ventanas(signal_in, sample_rate=30.0, n_mfcc=13, nfft=32, hop=8):
+    num_frames = max(1, 1 + int((len(signal_in) - nfft) / hop))
+    frames = np.zeros((num_frames, nfft))
+    
+    for i in range(num_frames):
+        start = i * hop
+        end = min(start + nfft, len(signal_in))
+        length = end - start
+        frames[i, :length] = signal_in[start:end] * np.hanning(length)
+        
+    mag_frames = np.abs(np.fft.rfft(frames, n=nfft))
+    pow_frames = ((1.0 / nfft) * (mag_frames ** 2))
+    
+    # Banco Mel simplificado (20 filtros)
+    n_filt = 20
+    low_freq_mel = 0
+    high_freq_mel = (2595 * np.log10(1 + (sample_rate / 2) / 700))
+    mel_points = np.linspace(low_freq_mel, high_freq_mel, n_filt + 2)
+    hz_points = (700 * (10**(mel_points / 2595) - 1))
+    bin_points = np.floor((nfft + 1) * hz_points / sample_rate).astype(int)
+    
+    fbank = np.zeros((n_filt, int(np.floor(nfft / 2 + 1))))
+    for m in range(1, n_filt + 1):
+        f_m_minus = bin_points[m - 1]
+        f_m = bin_points[m]
+        f_m_plus = bin_points[m + 1]
+        for k in range(f_m_minus, f_m):
+            fbank[m - 1, k] = (k - bin_points[m - 1]) / max(1, (f_m - f_m_minus))
+        for k in range(f_m, f_m_plus):
+            fbank[m - 1, k] = (bin_points[m + 1] - k) / max(1, (f_m_plus - f_m))
+            
+    filter_banks = np.dot(pow_frames, fbank.T)
+    filter_banks = np.where(filter_banks == 0, np.finfo(float).eps, filter_banks)
+    filter_banks = 20 * np.log10(filter_banks)
+    
+    return dct(filter_banks, type=2, axis=1, norm='ortho')[:, :n_mfcc].T
+
+# 3. Leer CSV procesado en Z
+df_z = pd.read_csv(archivo_entrada, index_col='frame')
+
+canales_activos = []
+vectores_resumen = []
+dicc_mfccs = {}
+
+# 4. Procesamiento por canal con las 3 mejoras
+for col in df_z.columns:
+    canal = df_z[col].values
+    energia_canal = np.std(canal)
+    
+    # MEJORA 3: Zero-Gating (Seleccionar si el punto realmente se movió)
+    if energia_canal < UMBRAL_ZERO_GATING:
+        mfcc_mat = np.zeros((n_mfcc, 1))  # Apagado
+    else:
+        # MEJORA 1: MFCC en ventanas temporales
+        mfcc_mat = extraer_mfcc_ventanas(canal, sample_rate=fs, n_mfcc=n_mfcc, nfft=nfft, hop=hop_length)
+        canales_activos.append(col)
+        
+    dicc_mfccs[col] = mfcc_mat
+    
+    # MEJORA 2: Feature Pooling (Resumen a tamaño fijo)
+    media = np.mean(mfcc_mat, axis=1)
+    std = np.std(mfcc_mat, axis=1)
+    maximo = np.max(mfcc_mat, axis=1)
+    
+    # Vector fijo por canal: 13 coeficientes x 3 estadísticos = 39 valores
+    vector_canal = np.hstack([media, std, maximo])
+    vectores_resumen.append(vector_canal)
+
+# Vector 1D global estandarizado para el modelo
+vector_movimiento_final = np.concatenate(vectores_resumen)
+
+# Exportar el vector listo para Machine Learning
+df_vector = pd.DataFrame([vector_movimiento_final])
+df_vector.to_csv(archivo_salida_csv, index=False)
+
+print(f"CSV de entrada procesado con éxito.")
+print(f"Canales evaluados: {len(df_z.columns)}")
+print(f"Canales ACTIVOS (por Zero-Gating): {len(canales_activos)} -> {canales_activos}")
+print(f"Dimensión del Vector Final de Movimiento: {vector_movimiento_final.shape}")
+print(f"Guardado en: '{archivo_salida_csv}'")
+
+# 5. Generar Gráfica de Verificación
+fig, axs = plt.subplots(2, 1, figsize=(10, 6))
+
+# Espectrograma MFCC en ventanas
+cax1 = axs[0].imshow(dicc_mfccs['RIGHT_WRIST_x'], aspect='auto', origin='lower', cmap='viridis')
+axs[0].set_title('Mejora 1: MFCCs en Ventanas Temporales (RIGHT_WRIST_x - ACTIVO)')
+axs[0].set_ylabel('Coeficiente MFCC')
+axs[0].set_xlabel('Ventana de Tiempo')
+fig.colorbar(cax1, ax=axs[0])
+
+# Stem Plot del Vector Fijo 1D
+axs[1].stem(vector_movimiento_final, markerfmt=' ', basefmt="k-")
+axs[1].set_title(f'Mejora 2 y 3: Vector Global Fijo ({len(vector_movimiento_final)} características)')
+axs[1].set_xlabel('Índice de Característica')
+axs[1].set_ylabel('Valor Estadístico')
+axs[1].grid(True, linestyle='--', alpha=0.5)
+
+plt.tight_layout()
+plt.savefig(archivo_grafica, dpi=300)
+plt.close()
+print(f"Gráfica guardada en: '{archivo_grafica}'")
